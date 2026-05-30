@@ -55,6 +55,28 @@ public class BurpLispTab {
             "(fn [request state]\n" +
             "  (assoc-in request [:headers \"X-Burp-Lisp\"] \"Active\"))\n");
 
+        presetSnippets.put("Preset: Session maintenance (Request & Response)", 
+            ";;; BurpLisp - Bidirectional Session Maintenance Macro\n" +
+            ";;; 1. Response hook extracts bearer token from response bodies.\n" +
+            ";;; 2. Request hook injects the extracted token into future requests.\n" +
+            "\n" +
+            "{:request (fn [request state]\n" +
+            "            ;; Read authorization token from dynamic state atom\n" +
+            "            (if-let [token (:token @state)]\n" +
+            "              (assoc-in request [:headers \"Authorization\"] (str \"Bearer \" token))\n" +
+            "              request))\n" +
+            "\n" +
+            " :response (fn [response state]\n" +
+            "             ;; Intercept body string to look for JWT access token\n" +
+            "             (let [body (:body response)]\n" +
+            "               (if (and (string? body) (.contains body \"\\\"access_token\\\"\"))\n" +
+            "                 (if-let [token (second (re-find #\"\\\"access_token\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\" body))]\n" +
+            "                   (do\n" +
+            "                     ;; Store the token inside global state\n" +
+            "                     (swap! state assoc :token token)\n" +
+            "                     (println \"Extracted Token: \" token)))))\n" +
+            "             response)}\n");
+
         presetSnippets.put("Preset: Host-based Conditional Modification", 
             ";;; BurpLisp - Host-based Conditional Modification\n" +
             ";;; Modifies request details ONLY when destination host matches specific target.\n" +
@@ -251,7 +273,7 @@ public class BurpLispTab {
         // Non-blocking EDT worker to compile Clojure expressions safely
         new SwingWorker<Boolean, Void>() {
             private String errorMessage = null;
-            private IFn compiledFunction = null;
+            private Object compilationResult = null;
 
             @Override
             protected Boolean doInBackground() throws Exception {
@@ -263,14 +285,13 @@ public class BurpLispTab {
 
                     // Grab clojure load-string compiler
                     IFn loadString = Clojure.var("clojure.core", "load-string");
-                    Object result = loadString.invoke(code);
+                    compilationResult = loadString.invoke(code);
 
-                    if (result instanceof IFn) {
-                        compiledFunction = (IFn) result;
+                    if (compilationResult instanceof IFn || compilationResult instanceof Map) {
                         return true;
                     } else {
-                        errorMessage = "The expression did not evaluate to a function (IFn). Got: " + 
-                                       (result != null ? result.getClass().getName() : "null");
+                        errorMessage = "The expression did not evaluate to a function (IFn) or a hook map (Map). Got: " + 
+                                       (compilationResult != null ? compilationResult.getClass().getName() : "null");
                         return false;
                     }
                 } catch (Throwable t) {
@@ -289,9 +310,9 @@ public class BurpLispTab {
                 try {
                     boolean success = get();
                     if (success) {
-                        httpHandler.setClojureFunction(compiledFunction);
+                        httpHandler.setClojureFunctions(compilationResult);
                         httpHandler.resetStateAtom(); // State atom is cleared on successful compilation
-                        log("Success! Compiled and applied Clojure function.");
+                        log("Success! Compiled and applied Clojure script.");
                         
                         saveSettings(); // Persist configuration on successful compilation
 
