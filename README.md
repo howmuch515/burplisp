@@ -1,8 +1,8 @@
 # BurpLisp - Modify Burp Suite Request Headers with Clojure
 
-`BurpLisp` is a Burp Suite extension that allows you to dynamically modify outgoing HTTP request headers using Clojure (Lisp) expressions.
+`BurpLisp` is a powerful Burp Suite extension that allows you to dynamically inspect and modify outgoing HTTP requests using Clojure (Lisp) expressions.
 
-With BurpLisp, you can write powerful Lisp code directly inside a dedicated tab in Burp Suite to alter headers on the fly. The extension packages the Clojure runtime inside, making it fully self-contained with no external dependencies required.
+With BurpLisp, you can write expressive Lisp code directly inside a dedicated tab in Burp Suite to alter headers, body payload, URLs, and target services on the fly. The extension packages the Clojure runtime inside, making it fully self-contained.
 
 ---
 
@@ -30,64 +30,110 @@ This will generate a self-contained JAR file at:
 
 ---
 
-## 📖 Usage Guide
+## 📖 Features & Architecture
 
-Once loaded, a new tab named **BurpLisp** will appear in the Burp Suite interface.
+### 1. Ring-Like Request Map (Flexible Request Manipulation)
+The Clojure function takes two arguments: `request` (a Map representing the HTTP Request) and `state` (an Atom holding dynamic shared state). It must return a modified version of the `request` Map.
 
-### 1. The Interface
-- **Enable BurpLisp (Checkbox)**: Toggles the request interception and modification on and off.
-- **Clojure Lisp Expression (Text Area)**: Write your Lisp code here. The code must evaluate to a function (`IFn`) that takes a single map of headers and returns the modified map of headers.
-- **Compile & Apply (Button)**: Compiles the Lisp code. If successful, it automatically applies the function to subsequent HTTP requests and auto-enables the extension.
-- **Execution Logs / Compiler Errors (Console)**: Displays real-time status, compiler syntax errors, and runtime execution errors.
+#### Request Map Structure:
+```clojure
+{:method "POST"
+ :url "https://api.example.com/v1/users?id=123"
+ :path "/v1/users"
+ :query "id=123"
+ :body "{\"username\": \"test\"}"
+ :headers {"Host" "api.example.com"
+           "Content-Type" "application/json"
+           "User-Agent" "ClojureClient"}
+ :service {:host "api.example.com"
+           :port 443
+           :secure true}}
+```
+
+#### Modifiable Map Attributes:
+- `:method` (String) - Changes the request method (e.g. `GET`, `POST`, `PUT`).
+- `:path` (String) - Changes the URL path.
+- `:query` (String) - Changes the URL query string parameters.
+- `:body` (String or byte[]) - Changes the request body. Supports JSON/XML strings or raw binaries.
+- `:headers` (Map) - Completely replaces the HTTP headers list.
+- `:service` (Map: `:host`, `:port`, `:secure`) - Modifies destination host, port, and SSL/TLS secure setting.
 
 ---
 
-## 💡 Clojure S-Expression Examples
+### 2. Thread-Safe Global State (`state` Atom)
+The `state` parameter is a standard Clojure `atom` (which starts as an empty map `{}`). It allows you to persist data across multiple HTTP requests safely (e.g. tracking session states, auto-incrementing serial indices, or propagating CSRF tokens dynamically).
 
-Your code must be a Clojure function that takes `headers` (represented as a Clojure map where keys and values are HTTP header names and values) and returns a new map of headers.
-
-Here are practical examples you can paste into the BurpLisp editor:
-
-### Example 1: Add or Update Headers (Default Example)
-Simply add `X-Burp-Lisp` and modify the `User-Agent`.
 ```clojure
-(fn [headers]
-  (-> headers
-      (assoc "X-Burp-Lisp" "Active")
-      (assoc "User-Agent" "BurpLispAgent/1.0")))
+(fn [request state]
+  ;; Update counter in state atom
+  (swap! state update :counter (fnil inc 0))
+  (let [count (:counter @state)]
+    (assoc-in request [:headers "X-Request-Index"] (str count))))
 ```
 
-### Example 2: Remove a Header
-Remove headers like `DNT` or `Sec-Ch-Ua`.
+---
+
+### 3. Comprehensive Target Scope & Tool Filtering
+To prevent unwanted browser noise, you can filter which requests pass through the Clojure runtime:
+- **Target Scope Only**: When enabled, BurpLisp ignores requests whose URL does not match Burp's target scope (`api.scope().isInScope(...)`).
+- **Applicable Tools**: Filter interception using checkboxes for **Proxy**, **Repeater**, **Intruder**, and **Scanner**.
+
+---
+
+### 4. Enterprise-Grade Stability & Robustness
+- **Automatic Preferences Storage**: Configurations (Clojure code, main toggle, scope toggles, and tool checkboxes) are saved automatically to Burp Suite's preferences, ensuring they persist between Burp Suite reboots or extension reloads.
+- **Asynchronous Non-Blocking Compilation**: Compiling Lisp code is offloaded from Swing's Event Dispatch Thread (EDT) into a `SwingWorker` background thread. The Burp Suite UI remains responsive during compilation.
+- **Interception Timeout Protection**: Modified requests run inside a cached daemon thread pool. If a user script crashes or hangs (e.g., infinite loop `(while true ...)`), the request times out after **500 milliseconds** and is safely forwarded unmodified, preventing Burp Suite from freezing.
+
+---
+
+## 💡 Practical S-Expression Presets
+
+Use the **Preset Snippets** dropdown inside the UI to instantly load common configurations:
+
+### 1. Add Custom Header (Default)
 ```clojure
-(fn [headers]
-  (-> headers
-      (dissoc "DNT")
-      (dissoc "Sec-Ch-Ua")))
+(fn [request state]
+  (assoc-in request [:headers "X-Burp-Lisp"] "Active"))
 ```
 
-### Example 3: Conditional Header Modification (Based on Host)
-Add a custom Authorization token *only* when the destination host is `api.example.com`.
+### 2. Host-based Conditional Modification
+Inject custom Authorization headers strictly when matching target domains:
 ```clojure
-(fn [headers]
-  (let [host (get headers "Host")]
+(fn [request state]
+  (let [host (get-in request [:service :host])]
     (if (= host "api.example.com")
-      (assoc headers "Authorization" "Bearer LISP-SECRET-TOKEN-12345")
-      headers)))
+      (-> request
+          (assoc-in [:headers "Authorization"] "Bearer SECRET-LISP-TOKEN")
+          (assoc-in [:headers "X-Lisp-Applied"] "true"))
+      request)))
 ```
 
-### Example 4: Dynamically Appending values
-Append extra tracing data to an existing header.
+### 3. URL Query Parameter Injection
+Add extra debugging parameters to the URL query string dynamically:
 ```clojure
-(fn [headers]
-  (let [existing-cookie (get headers "Cookie" "")]
-    (assoc headers "Cookie" (str existing-cookie "; lisp_session=active"))))
+(fn [request state]
+  (let [current-query (:query request)
+        new-query (if (empty? current-query)
+                    "debug=true&test=1"
+                    (str current-query "&debug=true&test=1"))]
+    (assoc request :query new-query)))
+```
+
+### 4. Search & Replace JSON Request Body
+Directly inspect and patch string values inside the JSON body payload:
+```clojure
+(fn [request state]
+  (let [body (:body request)]
+    (if (and (string? body) (.contains body "\"role\""))
+      (assoc request :body (.replace body "\"role\":\"user\"" "\"role\":\"admin\""))
+      request)))
 ```
 
 ---
 
-## 🛠️ How It Works Under the Hood
+## 🧑‍💻 Architecture Summary
 
-1. **Self-contained Clojure Environment**: The extension wraps the Clojure runtime (`org.clojure:clojure`). Inside `BurpLispTab.java`, we invoke `clojure.java.api.Clojure.var("clojure.core", "load-string")` to evaluate user input dynamically.
-2. **Clojure Map Conversion**: In `LispHttpHandler.java`, when Burp intercepts an outgoing HTTP request, it converts the Java HTTP headers list to a standard `java.util.LinkedHashMap`, then converts it to a native Clojure map using `clojure.lang.PersistentHashMap.create(headersMap)`.
-3. **Functional Application**: The Clojure function is invoked with this map, returns a new Clojure map, and the Java code uses it to rebuild the request headers.
+- [BurpLispExtension.java](file:///Users/appbana/workspace/github.com/howmuch515/burplisp/src/main/java/burplisp/BurpLispExtension.java): Extension initialization and registering Montoya scope APIs.
+- [BurpLispTab.java](file:///Users/appbana/workspace/github.com/howmuch515/burplisp/src/main/java/burplisp/BurpLispTab.java): Preferences storage, Swing-based layout, and SwingWorker compilation.
+- [LispHttpHandler.java](file:///Users/appbana/workspace/github.com/howmuch515/burplisp/src/main/java/burplisp/LispHttpHandler.java): Intercepts HTTP requests, handles thread pool futures with 500ms timeouts, maps Ring-like variables, and registers filters.
