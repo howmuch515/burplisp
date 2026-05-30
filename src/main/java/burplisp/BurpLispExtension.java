@@ -18,7 +18,7 @@ public class BurpLispExtension implements BurpExtension {
         api.extension().setName("BurpLisp");
 
         // Initialize and register HTTP handler
-        this.httpHandler = new LispHttpHandler(logging);
+        this.httpHandler = new LispHttpHandler(logging, api.scope());
         api.http().registerHttpHandler(httpHandler);
 
         // Initialize and register GUI Tab
