@@ -185,13 +185,104 @@ public class LispHttpHandler implements HttpHandler {
             ClassLoader extensionClassLoader = this.getClass().getClassLoader();
             Thread.currentThread().setContextClassLoader(extensionClassLoader);
 
-            Map<String, Object> reqMap = constructRequestMap(requestToBeSent);
+            // Construct Ring-like Request Map
+            Map<clojure.lang.Keyword , Object> reqMap = new HashMap<>();
+
+            // すべてClojureのKeywordオブジェクトに変換してキーにする
+            clojure.lang.Keyword kMethod = clojure.lang.Keyword.intern("method");
+            clojure.lang.Keyword kUrl = clojure.lang.Keyword.intern("url");
+            clojure.lang.Keyword kPath = clojure.lang.Keyword.intern("path");
+            clojure.lang.Keyword kQuery = clojure.lang.Keyword.intern("query");
+            clojure.lang.Keyword kHeaders = clojure.lang.Keyword.intern("headers");
+            clojure.lang.Keyword kService = clojure.lang.Keyword.intern("service");
+            clojure.lang.Keyword kBody = clojure.lang.Keyword.intern("body");
+
+            reqMap.put(kMethod, requestToBeSent.method());
+            reqMap.put(kUrl, requestToBeSent.url());
+            reqMap.put(kPath, requestToBeSent.path());
+            reqMap.put(kQuery, requestToBeSent.query());
+            reqMap.put(kBody, requestToBeSent.bodyToString());
+            
+            // Extract headers into key-value map
+            Map<String, String> headersMap = new HashMap<>();
+            for (HttpHeader h : requestToBeSent.headers()) {
+                headersMap.put(h.name(), h.value());
+            }
+            clojure.lang.IPersistentMap clojureHeadersMap = clojure.lang.PersistentHashMap.create(headersMap);
+            reqMap.put(kHeaders, clojureHeadersMap);
+            
+            // Extract service details
+            Map<String, Object> serviceMap = new HashMap<>();
+            serviceMap.put("host", requestToBeSent.httpService().host());
+            serviceMap.put("port", requestToBeSent.httpService().port());
+            serviceMap.put("secure", requestToBeSent.httpService().secure());
+            clojure.lang.IPersistentMap clojureServiceMap = clojure.lang.PersistentHashMap.create(headersMap);
+            reqMap.put(kService, clojureServiceMap);
+
+            // Cast Java map to native Clojure persistent structure
             clojure.lang.IPersistentMap clojureReq = clojure.lang.PersistentHashMap.create(reqMap);
 
             Object result = clojureFunction.invoke(clojureReq, clojureStateAtom);
 
             if (result instanceof Map) {
-                return applyRequestModifications(requestToBeSent, (Map<?, ?>) result);
+                Map<?, ?> resMap = (Map<?, ?>) result;
+                HttpRequest updatedRequest = requestToBeSent;
+
+                // 1. Method
+                if (resMap.containsKey(kMethod)) {
+                    updatedRequest = updatedRequest.withMethod(String.valueOf(resMap.get(kMethod)));
+                }
+
+                // 2. Service (host, port, secure)
+                if (resMap.containsKey(kService)) {
+                    Map<?, ?> sMap = (Map<?, ?>) resMap.get(kService);
+                    if (sMap != null) {
+                        String host = requestToBeSent.httpService().host();
+                        int port = requestToBeSent.httpService().port();
+                        boolean secure = requestToBeSent.httpService().secure();
+                        updatedRequest = updatedRequest.withService(burp.api.montoya.http.HttpService.httpService(host, port, secure));
+                    }
+                }
+
+                // 3. Path / Query
+                String path = resMap.containsKey(kPath) ? String.valueOf(resMap.get(kPath)) : requestToBeSent.path();
+                String query = resMap.containsKey(kQuery) ? (resMap.get(kQuery) != null ? String.valueOf(resMap.get(kQuery)) : null) : requestToBeSent.query();
+                if (query != null && !query.trim().isEmpty()) {
+                    updatedRequest = updatedRequest.withPath(path + "?" + query);
+                } else {
+                    updatedRequest = updatedRequest.withPath(path);
+                }
+
+                // 4. Headers (Safely clear and rebuild)
+                if (resMap.containsKey(kHeaders)) {
+                    Map<?, ?> newHeadersMap = (Map<?, ?>) resMap.get(kHeaders);
+                    if (newHeadersMap != null) {
+                        for (HttpHeader h : requestToBeSent.headers()) {
+                            updatedRequest = updatedRequest.withRemovedHeader(h.name());
+                        }
+                        for (Map.Entry<?, ?> entry : newHeadersMap.entrySet()) {
+                            String name = String.valueOf(entry.getKey());
+                            String value = String.valueOf(entry.getValue());
+                            updatedRequest = updatedRequest.withAddedHeader(name, value);
+                        }
+                    }
+                }
+
+                // 5. Body
+                if (resMap.containsKey(kBody)) {
+                    Object bodyObj = resMap.get(kBody);
+                    if (bodyObj != null) {
+                        if (bodyObj instanceof byte[]) {
+                            updatedRequest = updatedRequest.withBody(burp.api.montoya.core.ByteArray.byteArray((byte[]) bodyObj));
+                        } else {
+                            updatedRequest = updatedRequest.withBody(String.valueOf(bodyObj));
+                        }
+                    }
+                }
+
+                return updatedRequest;
+            } else {
+                logging.logToError("BurpLisp error: Clojure function did not return a valid map structure.");
             }
         } finally {
             Thread.currentThread().setContextClassLoader(originalClassLoader);
