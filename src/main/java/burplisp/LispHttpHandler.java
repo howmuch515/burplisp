@@ -55,6 +55,7 @@ public class LispHttpHandler implements HttpHandler {
             IFn atomFn = Clojure.var("clojure.core", "atom");
             IFn hashMapFn = Clojure.var("clojure.core", "hash-map");
             this.clojureStateAtom = atomFn.invoke(hashMapFn.invoke());
+            publishStateAtom();
         } catch (Exception e) {
             logging.logToError("Failed to initialize Clojure state atom: " + e.getMessage());
         } finally {
@@ -101,6 +102,22 @@ public class LispHttpHandler implements HttpHandler {
         this.repeaterEnabled = repeaterEnabled;
         this.intruderEnabled = intruderEnabled;
         this.scannerEnabled = scannerEnabled;
+    }
+
+    private void publishStateAtom() {
+        ClassLoader originalClassLoader = Thread.currentThread().getContextClassLoader();
+        try {
+            ClassLoader extensionClassLoader = this.getClass().getClassLoader();
+            Thread.currentThread().setContextClassLoader(extensionClassLoader);
+
+            clojure.lang.Symbol userSym = clojure.lang.Symbol.intern("user");
+            clojure.lang.Symbol stateSym = clojure.lang.Symbol.intern("*burplisp-state*");
+            clojure.lang.Namespace userNs = clojure.lang.Namespace.findOrCreate(userSym);
+            clojure.lang.Var stateVar = userNs.intern(stateSym);
+            stateVar.bindRoot(this.clojureStateAtom);
+        } finally {
+            Thread.currentThread().setContextClassLoader(originalClassLoader);
+        }
     }
 
     @Override
